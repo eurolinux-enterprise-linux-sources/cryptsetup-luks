@@ -1,0 +1,180 @@
+--- cryptsetup-1.2.0.old/lib/crypto_backend/crypto_backend.h	2011-02-07 16:25:56.000000000 +0100
++++ cryptsetup-1.2.0/lib/crypto_backend/crypto_backend.h	2011-02-07 16:26:36.119607358 +0100
+@@ -30,4 +30,7 @@ int crypt_hmac_write(struct crypt_hmac *
+ int crypt_hmac_final(struct crypt_hmac *ctx, char *buffer, size_t length);
+ int crypt_hmac_destroy(struct crypt_hmac *ctx);
+ 
++/* RNG */
++int crypt_backend_rng(char *buffer, size_t length);
++
+ #endif /* _CRYPTO_BACKEND_H */
+--- cryptsetup-1.2.0.old/lib/crypto_backend/crypto_gcrypt.c	2011-02-07 16:25:56.000000000 +0100
++++ cryptsetup-1.2.0/lib/crypto_backend/crypto_gcrypt.c	2011-02-07 16:26:36.119607358 +0100
+@@ -21,9 +21,11 @@
+ #include <errno.h>
+ #include <assert.h>
+ #include <gcrypt.h>
++#include <fipscheck.h>
++#include <stdlib.h>
+ #include "crypto_backend.h"
+ 
+-#define GCRYPT_REQ_VERSION "1.1.42"
++#define GCRYPT_REQ_VERSION "1.4.5"
+ 
+ static int crypto_backend_initialised = 0;
+ 
+@@ -45,6 +47,15 @@ int crypt_backend_init(struct crypt_devi
+ 		return 0;
+ 
+ 	log_dbg("Initialising gcrypt crypto backend.");
++
++	if (FIPSCHECK_kernel_fips_mode()) {
++		if (!FIPSCHECK_verify("libcryptsetup.so.1", "crypt_init")) {
++			log_err(ctx, "FIPS checksum verification failed.\n");
++			exit(EXIT_FAILURE);
++		}
++		log_std(ctx, "Running in FIPS mode.\n");
++	}
++
+ 	if (!gcry_control (GCRYCTL_INITIALIZATION_FINISHED_P)) {
+ 		if (!gcry_check_version (GCRYPT_REQ_VERSION)) {
+ 			return -ENOSYS;
+@@ -225,3 +236,11 @@ int crypt_hmac_destroy(struct crypt_hmac
+ 	free(ctx);
+ 	return 0;
+ }
++
++/* RNG */
++int crypt_backend_rng(char *buffer, size_t length)
++{
++	log_dbg("Generating %d random bytes using FIPS RNG.", (int)length);
++	gcry_randomize(buffer, length, GCRY_VERY_STRONG_RANDOM);
++	return 0;
++}
+--- cryptsetup-1.2.0.old/lib/libdevmapper.c	2010-10-27 10:21:23.000000000 +0200
++++ cryptsetup-1.2.0/lib/libdevmapper.c	2011-02-07 16:26:36.119607358 +0100
+@@ -461,6 +461,8 @@ int dm_create_device(const char *name,
+ 			goto out_no_removal;
+ 	}
+ 
++	if (!dm_task_secure_data(dmt))
++		goto out_no_removal;
+ 	if (read_only && !dm_task_set_ro(dmt))
+ 		goto out_no_removal;
+ 	if (!dm_task_add_target(dmt, 0, size, DM_CRYPT_TARGET, params))
+@@ -585,6 +587,8 @@ int dm_query_device(const char *name,
+ 
+ 	if (!(dmt = dm_task_create(DM_DEVICE_TABLE)))
+ 		goto out;
++	if (!dm_task_secure_data(dmt))
++		goto out;
+ 	if (!dm_task_set_name(dmt, name))
+ 		goto out;
+ 	r = -ENODEV;
+@@ -690,6 +694,9 @@ static int _dm_message(const char *name,
+ 	if (!(dmt = dm_task_create(DM_DEVICE_TARGET_MSG)))
+ 		return 0;
+ 
++	if (!dm_task_secure_data(dmt))
++		goto out;
++
+ 	if (name && !dm_task_set_name(dmt, name))
+ 		goto out;
+ 
+--- cryptsetup-1.2.0.old/lib/Makefile.am	2011-02-07 16:25:56.000000000 +0100
++++ cryptsetup-1.2.0/lib/Makefile.am	2011-02-07 16:26:36.119607358 +0100
+@@ -32,6 +32,7 @@ libcryptsetup_la_LIBADD = \
+ 	@UUID_LIBS@				\
+ 	@DEVMAPPER_LIBS@			\
+ 	@LIBGCRYPT_LIBS@			\
++	-lfipscheck				\
+ 	luks1/libluks1.la
+ 
+ libcryptsetup_la_SOURCES = \
+--- cryptsetup-1.2.0.old/lib/Makefile.in	2011-02-07 16:25:56.000000000 +0100
++++ cryptsetup-1.2.0/lib/Makefile.in	2011-02-07 16:26:36.119607358 +0100
+@@ -315,6 +315,7 @@ libcryptsetup_la_LIBADD = \
+ 	@UUID_LIBS@				\
+ 	@DEVMAPPER_LIBS@			\
+ 	@LIBGCRYPT_LIBS@			\
++	-lfipscheck				\
+ 	luks1/libluks1.la
+ 
+ libcryptsetup_la_SOURCES = \
+--- cryptsetup-1.2.0.old/lib/random.c	2011-02-07 16:25:56.000000000 +0100
++++ cryptsetup-1.2.0/lib/random.c	2011-02-07 16:26:36.119607358 +0100
+@@ -22,7 +22,9 @@
+ #include <fcntl.h>
+ #include <errno.h>
+ #include <assert.h>
++#include <fipscheck.h>
+ 
++#include "crypto_backend.h"
+ #include "libcryptsetup.h"
+ #include "internal.h"
+ 
+@@ -176,6 +178,10 @@ int crypt_random_get(struct crypt_device
+ 		status = _get_urandom(ctx, buf, len);
+ 		break;
+ 	case CRYPT_RND_KEY:
++		if (FIPSCHECK_kernel_fips_mode()) {
++			status = crypt_backend_rng(buf, len);
++			break;
++		}
+ 		rng_type = ctx ? crypt_get_rng_type(ctx) :
+ 				 crypt_random_default_key_rng();
+ 		switch (rng_type) {
+--- cryptsetup-1.2.0.old/src/cryptsetup.c	2010-12-09 19:14:25.000000000 +0100
++++ cryptsetup-1.2.0/src/cryptsetup.c	2011-02-07 16:26:36.119607358 +0100
+@@ -8,6 +8,7 @@
+ #include <unistd.h>
+ #include <fcntl.h>
+ #include <assert.h>
++#include <fipscheck.h>
+ 
+ #include <libcryptsetup.h>
+ #include <popt.h>
+@@ -957,6 +958,12 @@ int main(int argc, char **argv)
+ 	bindtextdomain(PACKAGE, LOCALEDIR);
+ 	textdomain(PACKAGE);
+ 
++	if (FIPSCHECK_kernel_fips_mode() &&
++	    !FIPSCHECK_verify(NULL, NULL)) {
++		log_err("FIPS checksum verification failed.\n");
++		exit(EXIT_FAILURE);
++	}
++
+ 	popt_context = poptGetContext(PACKAGE, argc, (const char **)argv,
+ 	                              popt_options, 0);
+ 	poptSetOtherOptionHelp(popt_context,
+--- cryptsetup-1.2.0.old/src/Makefile.am	2010-10-27 10:21:23.000000000 +0200
++++ cryptsetup-1.2.0/src/Makefile.am	2011-02-07 16:26:36.119607358 +0100
+@@ -16,6 +16,7 @@ cryptsetup_SOURCES = \
+ 
+ cryptsetup_LDADD = \
+ 	$(top_builddir)/lib/libcryptsetup.la	\
++	-lfipscheck				\
+ 	@POPT_LIBS@
+ 
+ cryptsetup_CFLAGS = -Wall
+--- cryptsetup-1.2.0.old/src/Makefile.in	2010-12-20 12:35:53.000000000 +0100
++++ cryptsetup-1.2.0/src/Makefile.in	2011-02-07 16:26:36.129605521 +0100
+@@ -255,6 +255,7 @@ cryptsetup_SOURCES = \
+ 
+ cryptsetup_LDADD = \
+ 	$(top_builddir)/lib/libcryptsetup.la	\
++	-lfipscheck				\
+ 	@POPT_LIBS@
+ 
+ cryptsetup_CFLAGS = -Wall
+--- cryptsetup-1.2.0.old/lib/luks1/keymanage.c	2010-11-14 21:02:22.000000000 +0100
++++ cryptsetup-1.2.0/lib/luks1/keymanage.c	2011-04-04 21:28:29.276359839 +0200
+@@ -543,7 +543,7 @@ int LUKS_set_key(const char *device, uns
+ 	log_dbg("Key slot %d use %d password iterations.", keyIndex, hdr->keyblock[keyIndex].passwordIterations);
+ 
+ 	r = crypt_random_get(ctx, hdr->keyblock[keyIndex].passwordSalt,
+-		       LUKS_SALTSIZE, CRYPT_RND_NORMAL);
++		       LUKS_SALTSIZE, CRYPT_RND_KEY);
+ 	if(r < 0) return r;
+ 
+ //	assert((vk->keylength % TWOFISH_BLOCKSIZE) == 0); FIXME

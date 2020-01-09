@@ -1,0 +1,1094 @@
+--- cryptsetup-1.2.0.old/lib/backends.c	2010-12-09 15:37:54.000000000 +0100
++++ cryptsetup-1.2.0/lib/backends.c	1970-01-01 01:00:00.000000000 +0100
+@@ -1,96 +0,0 @@
+-#include <stdio.h>
+-#include <string.h>
+-#include <stdlib.h>
+-#include <errno.h>
+-
+-#include "libcryptsetup.h"
+-#include "internal.h"
+-
+-extern struct hash_backend hash_gcrypt_backend;
+-
+-static struct hash_backend *hash_backends[] = {
+-	&hash_gcrypt_backend,
+-	NULL
+-};
+-
+-struct hash_backend *get_hash_backend(const char *name)
+-{
+-	struct hash_backend **backend;
+-
+-	for(backend = hash_backends; *backend; backend++)
+-		if (!name || strcmp(name, (*backend)->name) == 0)
+-			break;
+-
+-	return *backend;
+-}
+-
+-void put_hash_backend(struct hash_backend *backend)
+-{
+-}
+-
+-int hash(const char *backend_name, const char *hash_name,
+-         char *result, size_t size,
+-         const char *passphrase, size_t sizep)
+-{
+-	struct hash_backend *backend;
+-	struct hash_type *hashes = NULL, *hash;
+-	char hash_name_buf[256], *s;
+-	size_t pad = 0;
+-	int r = -ENOENT;
+-
+-	if (strlen(hash_name) >= sizeof(hash_name_buf)) {
+-		set_error("hash name too long: %s", hash_name);
+-		return -ENAMETOOLONG;
+-	}
+-
+-	if ((s = strchr(hash_name, ':'))) {
+-		size_t hlen;
+-		strcpy(hash_name_buf, hash_name);
+-		hash_name_buf[s-hash_name] = '\0';
+-		hash_name = hash_name_buf;
+-		hlen = atoi(++s);
+-		if (hlen > size) {
+-			set_error("requested hash length (%zd) > key length (%zd)", hlen, size);
+-			return -EINVAL;
+-		}
+-		pad = size-hlen;
+-		size = hlen;
+-	}
+-
+-	backend = get_hash_backend(backend_name);
+-	if (!backend) {
+-		set_error("No hash backend found");
+-		return -ENOSYS;
+-	}
+-
+-	hashes = backend->get_hashes();
+-	if (!hashes) {
+-		set_error("No hash functions available");
+-		goto out;
+-	}
+-
+-	for(hash = hashes; hash->name; hash++)
+-		if (strcmp(hash->name, hash_name) == 0)
+-			break;
+-	if (!hash->name) {
+-		set_error("Unknown hash type %s", hash_name);
+-		goto out;
+-	}
+-
+-	r = hash->fn(hash->private, size, result, sizep, passphrase);
+-	if (r < 0) {
+-		set_error("Error hashing passphrase");
+-		goto out;
+-	}
+-
+-	if (pad) {
+-		memset(result+size, 0, pad);
+-	}
+-
+-out:
+-	if (hashes)
+-		backend->free_hashes(hashes);
+-	put_hash_backend(backend);
+-
+-	return r;
+-}
+--- cryptsetup-1.2.0.old/lib/crypto_backend/crypto_backend.h	1970-01-01 01:00:00.000000000 +0100
++++ cryptsetup-1.2.0/lib/crypto_backend/crypto_backend.h	2011-01-10 21:19:00.194180594 +0100
+@@ -0,0 +1,33 @@
++#ifndef _CRYPTO_BACKEND_H
++#define _CRYPTO_BACKEND_H
++
++#include "libcryptsetup.h"
++#include "internal.h"
++
++struct crypt_hash;
++struct crypt_hmac;
++
++int crypt_backend_init(struct crypt_device *ctx);
++
++#define CRYPT_BACKEND_KERNEL (1 << 0)	/* Crypto uses kernel part, for benchmark */
++
++uint32_t crypt_backend_flags(void);
++
++/* HASH */
++int crypt_hash_size(const char *name);
++int crypt_hash_init(struct crypt_hash **ctx, const char *name);
++int crypt_hash_restart(struct crypt_hash *ctx);
++int crypt_hash_write(struct crypt_hash *ctx, const char *buffer, size_t length);
++int crypt_hash_final(struct crypt_hash *ctx, char *buffer, size_t length);
++int crypt_hash_destroy(struct crypt_hash *ctx);
++
++/* HMAC */
++int crypt_hmac_size(const char *name);
++int crypt_hmac_init(struct crypt_hmac **ctx, const char *name,
++		    const void *buffer, size_t length);
++int crypt_hmac_restart(struct crypt_hmac *ctx);
++int crypt_hmac_write(struct crypt_hmac *ctx, const char *buffer, size_t length);
++int crypt_hmac_final(struct crypt_hmac *ctx, char *buffer, size_t length);
++int crypt_hmac_destroy(struct crypt_hmac *ctx);
++
++#endif /* _CRYPTO_BACKEND_H */
+--- cryptsetup-1.2.0.old/lib/crypto_backend/crypto_gcrypt.c	1970-01-01 01:00:00.000000000 +0100
++++ cryptsetup-1.2.0/lib/crypto_backend/crypto_gcrypt.c	2011-01-10 21:21:57.283105620 +0100
+@@ -0,0 +1,227 @@
++/*
++ * GCRYPT crypto backend implementation
++ *
++ * Copyright (C) 2010 Red Hat, Inc. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++#include <string.h>
++#include <errno.h>
++#include <assert.h>
++#include <gcrypt.h>
++#include "crypto_backend.h"
++
++#define GCRYPT_REQ_VERSION "1.1.42"
++
++static int crypto_backend_initialised = 0;
++
++struct crypt_hash {
++	gcry_md_hd_t hd;
++	int hash_id;
++	int hash_len;
++};
++
++struct crypt_hmac {
++	gcry_md_hd_t hd;
++	int hash_id;
++	int hash_len;
++};
++
++int crypt_backend_init(struct crypt_device *ctx)
++{
++	if (crypto_backend_initialised)
++		return 0;
++
++	log_dbg("Initialising gcrypt crypto backend.");
++	if (!gcry_control (GCRYCTL_INITIALIZATION_FINISHED_P)) {
++		if (!gcry_check_version (GCRYPT_REQ_VERSION)) {
++			return -ENOSYS;
++		}
++
++/* FIXME: If gcrypt compiled to support POSIX 1003.1e capabilities,
++ * it drops all privileges during secure memory initialisation.
++ * For now, the only workaround is to disable secure memory in gcrypt.
++ * cryptsetup always need at least cap_sys_admin privilege for dm-ioctl
++ * and it locks its memory space anyway.
++ */
++#if 0
++		log_dbg("Initializing crypto backend (secure memory disabled).");
++		gcry_control (GCRYCTL_DISABLE_SECMEM);
++#else
++
++		gcry_control (GCRYCTL_SUSPEND_SECMEM_WARN);
++		gcry_control (GCRYCTL_INIT_SECMEM, 16384, 0);
++		gcry_control (GCRYCTL_RESUME_SECMEM_WARN);
++#endif
++		gcry_control (GCRYCTL_INITIALIZATION_FINISHED, 0);
++	}
++
++	crypto_backend_initialised = 1;
++	return 0;
++}
++
++uint32_t crypt_backend_flags(void)
++{
++	return 0;
++}
++
++/* HASH */
++int crypt_hash_size(const char *name)
++{
++	int hash_id;
++
++	assert(crypto_backend_initialised);
++
++	hash_id = gcry_md_map_name(name);
++	if (!hash_id)
++		return -EINVAL;
++
++	return gcry_md_get_algo_dlen(hash_id);
++}
++
++int crypt_hash_init(struct crypt_hash **ctx, const char *name)
++{
++	struct crypt_hash *h;
++
++	assert(crypto_backend_initialised);
++
++	h = malloc(sizeof(*h));
++	if (!h)
++		return -ENOMEM;
++
++	h->hash_id = gcry_md_map_name(name);
++	if (!h->hash_id) {
++		free(h);
++		return -EINVAL;
++	}
++
++	if (gcry_md_open(&h->hd, h->hash_id, 0)) {
++		free(h);
++		return -EINVAL;
++	}
++
++	h->hash_len = gcry_md_get_algo_dlen(h->hash_id);
++	*ctx = h;
++	return 0;
++}
++
++int crypt_hash_restart(struct crypt_hash *ctx)
++{
++	gcry_md_reset(ctx->hd);
++	return 0;
++}
++
++int crypt_hash_write(struct crypt_hash *ctx, const char *buffer, size_t length)
++{
++	gcry_md_write(ctx->hd, buffer, length);
++	return 0;
++}
++
++int crypt_hash_final(struct crypt_hash *ctx, char *buffer, size_t length)
++{
++	unsigned char *hash;
++
++	if (length > ctx->hash_len)
++		return -EINVAL;
++
++	hash = gcry_md_read(ctx->hd, ctx->hash_id);
++	if (!hash)
++		return -EINVAL;
++
++	memcpy(buffer, hash, length);
++	return 0;
++}
++
++int crypt_hash_destroy(struct crypt_hash *ctx)
++{
++	gcry_md_close(ctx->hd);
++	memset(ctx, 0, sizeof(*ctx));
++	free(ctx);
++	return 0;
++}
++
++/* HMAC */
++int crypt_hmac_size(const char *name)
++{
++	return crypt_hash_size(name);
++}
++
++int crypt_hmac_init(struct crypt_hmac **ctx, const char *name,
++		    const void *buffer, size_t length)
++{
++	struct crypt_hmac *h;
++
++	assert(crypto_backend_initialised);
++
++	h = malloc(sizeof(*h));
++	if (!h)
++		return -ENOMEM;
++
++	h->hash_id = gcry_md_map_name(name);
++	if (!h->hash_id) {
++		free(h);
++		return -EINVAL;
++	}
++
++	if (gcry_md_open(&h->hd, h->hash_id, GCRY_MD_FLAG_HMAC)) {
++		free(h);
++		return -EINVAL;
++	}
++
++	if (gcry_md_setkey(h->hd, buffer, length)) {
++		gcry_md_close(h->hd);
++		free(h);
++		return -EINVAL;
++	}
++
++	h->hash_len = gcry_md_get_algo_dlen(h->hash_id);
++	*ctx = h;
++	return 0;
++}
++
++int crypt_hmac_restart(struct crypt_hmac *ctx)
++{
++	gcry_md_reset(ctx->hd);
++	return 0;
++}
++
++int crypt_hmac_write(struct crypt_hmac *ctx, const char *buffer, size_t length)
++{
++	gcry_md_write(ctx->hd, buffer, length);
++	return 0;
++}
++
++int crypt_hmac_final(struct crypt_hmac *ctx, char *buffer, size_t length)
++{
++	unsigned char *hash;
++
++	if (length > ctx->hash_len)
++		return -EINVAL;
++
++	hash = gcry_md_read(ctx->hd, ctx->hash_id);
++	if (!hash)
++		return -EINVAL;
++
++	memcpy(buffer, hash, length);
++	return 0;
++}
++
++int crypt_hmac_destroy(struct crypt_hmac *ctx)
++{
++	gcry_md_close(ctx->hd);
++	memset(ctx, 0, sizeof(*ctx));
++	free(ctx);
++	return 0;
++}
+--- cryptsetup-1.2.0.old/lib/crypt_plain.c	1970-01-01 01:00:00.000000000 +0100
++++ cryptsetup-1.2.0/lib/crypt_plain.c	2011-01-10 21:19:00.195105797 +0100
+@@ -0,0 +1,94 @@
++/*
++ * cryptsetup plain device helper functions
++ *
++ * Copyright (C) 2004 Christophe Saout <christophe@saout.de>
++ * Copyright (C) 2010 Red Hat, Inc. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++#include <string.h>
++#include <stdlib.h>
++#include <errno.h>
++
++#include "internal.h"
++#include "crypto_backend.h"
++
++static int hash(const char *hash_name, int size, char *key,
++		int sizep, const char *passphrase)
++{
++	struct crypt_hash *md = NULL;
++	size_t slen;
++	int len = crypt_hash_size(hash_name);
++	int round, i;
++
++	if (crypt_hash_init(&md, hash_name))
++		return -ENOENT;
++
++	for(round = 0; size; round++) {
++		/* hack from hashalot to avoid null bytes in key */
++		for(i = 0; i < round; i++)
++			crypt_hash_write(md, "A", 1);
++
++		crypt_hash_write(md, passphrase, sizep);
++
++		if (len > size)
++			len = size;
++		slen = len;
++		crypt_hash_final(md, key, slen);
++		// FIXME: if slen != len
++
++		key += len;
++		size -= len;
++		if (size)
++			crypt_hash_restart(md);
++	}
++
++	crypt_hash_destroy(md);
++	return 0;
++}
++
++int crypt_plain_hash(struct crypt_device *ctx, const char *hash_name,
++		     char *result, size_t size,
++		     const char *passphrase, size_t sizep)
++{
++	char hash_name_buf[256], *s;
++	size_t hlen, pad = 0;
++	int r;
++
++	if (strlen(hash_name) >= sizeof(hash_name_buf))
++		return -EINVAL;
++
++	if ((s = strchr(hash_name, ':'))) {
++		strcpy(hash_name_buf, hash_name);
++		hash_name_buf[s-hash_name] = '\0';
++		hash_name = hash_name_buf;
++		hlen = atoi(++s);
++		if (hlen > size) {
++			log_err(ctx, "Requested hash length (%zd) > key length (%zd)\n", hlen, size);
++			return -EINVAL;
++		}
++		pad = size-hlen;
++		size = hlen;
++	}
++
++	r = hash(hash_name, size, result, sizep, passphrase);
++	if (r < 0)
++		log_err(ctx, "Hash algorithm %s not supported.\n", hash_name);
++
++	if (r == 0 && pad)
++		memset(result+size, 0, pad);
++
++	return r;
++}
+--- cryptsetup-1.2.0.old/lib/gcrypt.c	2010-12-09 15:37:54.000000000 +0100
++++ cryptsetup-1.2.0/lib/gcrypt.c	1970-01-01 01:00:00.000000000 +0100
+@@ -1,163 +0,0 @@
+-#include <stdlib.h>
+-#include <string.h>
+-#include <ctype.h>
+-#include <errno.h>
+-#include <gcrypt.h>
+-
+-#include "libcryptsetup.h"
+-#include "internal.h"
+-
+-#define MAX_DIGESTS		64
+-#define GCRYPT_REQ_VERSION	"1.1.42"
+-
+-int init_crypto(struct crypt_device *ctx)
+-{
+-	int r;
+-
+-	r = crypt_random_init(ctx);
+-	if (r < 0)
+-		goto fail;
+-
+-	if (!gcry_control (GCRYCTL_INITIALIZATION_FINISHED_P)) {
+-		if (!gcry_check_version (GCRYPT_REQ_VERSION)) {
+-			r = -ENOSYS;
+-			goto fail;
+-		}
+-
+-/* FIXME: If gcrypt compiled to support POSIX 1003.1e capabilities,
+- * it drops all privileges during secure memory initialisation.
+- * For now, the only workaround is to disable secure memory in gcrypt.
+- * cryptsetup always need at least cap_sys_admin privilege for dm-ioctl
+- * and it locks its memory space anyway.
+- */
+-#if 0
+-		log_dbg("Initializing crypto backend (secure memory disabled).");
+-		gcry_control (GCRYCTL_DISABLE_SECMEM);
+-#else
+-		log_dbg("Initializing crypto backend (using secure memory).");
+-		gcry_control (GCRYCTL_SUSPEND_SECMEM_WARN);
+-		gcry_control (GCRYCTL_INIT_SECMEM, 16384, 0);
+-		gcry_control (GCRYCTL_RESUME_SECMEM_WARN);
+-#endif
+-		gcry_control (GCRYCTL_INITIALIZATION_FINISHED, 0);
+-	}
+-
+-	return 0;
+-fail:
+-	log_err(ctx, _("Cannot initialize crypto backend.\n"));
+-	return r;
+-}
+-
+-static int gcrypt_hash(void *data, int size, char *key,
+-                       int sizep, const char *passphrase)
+-{
+-	gcry_md_hd_t md;
+-	int algo = *((int *)data);
+-	int len = gcry_md_get_algo_dlen(algo);
+-	int round, i;
+-
+-	if (gcry_md_open(&md, algo, 0))
+-		return -1;
+-
+-	for(round = 0; size; round++) {
+-		/* hack from hashalot to avoid null bytes in key */
+-		for(i = 0; i < round; i++)
+-			gcry_md_write(md, "A", 1);
+-
+-		gcry_md_write(md, passphrase, sizep);
+-
+-		if (len > size)
+-			len = size;
+-		memcpy(key, gcry_md_read(md, algo), len);
+-
+-		key += len;
+-		size -= len;
+-		if (size)
+-			gcry_md_reset(md);
+-	}
+-
+-	gcry_md_close(md);
+-	return 0;
+-}
+-
+-static struct hash_type *gcrypt_get_hashes(void)
+-{
+-	struct hash_type *hashes;
+-	int size = MAX_DIGESTS;
+-	int *list;
+-	int i;
+-	gcry_error_t r;
+-
+-	if (!gcry_check_version(GCRYPT_REQ_VERSION))
+-		return NULL;
+-
+-	list = (int *)malloc(sizeof(*list) * size);
+-	if (!list)
+-		return NULL;
+-
+-	r = gcry_md_list(list, &size);
+-	if (r || !size) {
+-		free(list);
+-		return NULL;
+-	}
+-
+-	hashes = malloc(sizeof(*hashes) * (size + 1));
+-	if (!hashes) {
+-		free(list);
+-		return NULL;
+-	}
+-
+-	for(i = 0; i < size; i++) {
+-		hashes[i].name = NULL;
+-		hashes[i].private = NULL;
+-	}
+-
+-	for(i = 0; i < size; i++) {
+-		char *p;
+-
+-		hashes[i].name = strdup(gcry_md_algo_name(list[i]));
+-		if(!hashes[i].name)
+-			goto err;
+-		for(p = (char *)hashes[i].name; *p; p++)
+-			*p = tolower(*p);
+-		hashes[i].private = malloc(sizeof(int));
+-		if(!hashes[i].private)
+-			goto err;
+-		*((int *)hashes[i].private) = list[i];
+-		hashes[i].fn = gcrypt_hash;
+-	}
+-	hashes[i].name = NULL;
+-	hashes[i].private = NULL;
+-	hashes[i].fn = NULL;
+-
+-	free(list);
+-
+-	return hashes;
+-
+-err:
+-	free(list);
+-	for(i = 0; i < size; i++) {
+-		free(hashes[i].name);
+-		free(hashes[i].private);
+-	}
+-	free(hashes);
+-	return NULL;
+-}
+-
+-static void gcrypt_free_hashes(struct hash_type *hashes)
+-{
+-	struct hash_type *hash;
+-
+-	for(hash = hashes; hash->name; hash++) {
+-		free(hash->name);
+-		free(hash->private);
+-	}
+-
+-	free(hashes);
+-}
+-
+-struct hash_backend hash_gcrypt_backend = {
+-	.name = "libgcrypt",
+-	.get_hashes = gcrypt_get_hashes,
+-	.free_hashes = gcrypt_free_hashes
+-};
+--- cryptsetup-1.2.0.old/lib/internal.h	2010-12-09 15:37:54.000000000 +0100
++++ cryptsetup-1.2.0/lib/internal.h	2011-01-10 21:19:00.195105797 +0100
+@@ -57,13 +57,6 @@ void set_error_va(const char *fmt, va_li
+ void set_error(const char *fmt, ...);
+ const char *get_error(void);
+ 
+-int init_crypto(struct crypt_device *ctx);
+-struct hash_backend *get_hash_backend(const char *name);
+-void put_hash_backend(struct hash_backend *backend);
+-int hash(const char *backend_name, const char *hash_name,
+-         char *result, size_t size,
+-         const char *passphrase, size_t sizep);
+-
+ /* Device mapper backend */
+ const char *dm_get_dir(void);
+ int dm_init(struct crypt_device *context, int check_kernel);
+@@ -127,4 +120,8 @@ int crypt_random_get(struct crypt_device
+ void crypt_random_exit(void);
+ int crypt_random_default_key_rng(void);
+ 
++int crypt_plain_hash(struct crypt_device *ctx, const char *hash_name,
++		     char *result, size_t size,
++		     const char *passphrase, size_t sizep);
++
+ #endif /* INTERNAL_H */
+--- cryptsetup-1.2.0.old/lib/luks1/af.c	2010-12-09 15:37:54.000000000 +0100
++++ cryptsetup-1.2.0/lib/luks1/af.c	2011-01-10 21:19:00.196168234 +0100
+@@ -1,7 +1,8 @@
+ /*
+  * AFsplitter - Anti forensic information splitter
+- * Copyright 2004, Clemens Fruhwirth <clemens@endorphin.org>
+- * Copyright (C) 2009 Red Hat, Inc. All rights reserved.
++ *
++ * Copyright (C) 2004 Clemens Fruhwirth <clemens@endorphin.org>
++ * Copyright (C) 2009-2010 Red Hat, Inc. All rights reserved.
+  *
+  * AFsplitter diffuses information over a large stripe of data,
+  * therefor supporting secure data destruction.
+@@ -25,10 +26,10 @@
+ #include <string.h>
+ #include <netinet/in.h>
+ #include <errno.h>
+-#include <gcrypt.h>
++#include "crypto_backend.h"
+ #include "internal.h"
+ 
+-static void XORblock(char const *src1, char const *src2, char *dst, size_t n)
++static void XORblock(const char *src1, const char *src2, char *dst, size_t n)
+ {
+ 	size_t j;
+ 
+@@ -36,19 +37,19 @@ static void XORblock(char const *src1, c
+ 		dst[j] = src1[j] ^ src2[j];
+ }
+ 
+-static int hash_buf(char *src, char *dst, uint32_t iv, int len, int hash_id)
++static int hash_buf(const char *src, char *dst, uint32_t iv,
++		    size_t len, const char *hash_name)
+ {
+-	gcry_md_hd_t hd;
+-	unsigned char *digest;
++	struct crypt_hash *hd = NULL;
++	char *iv_char = (char *)&iv;
+ 
+ 	iv = htonl(iv);
+-	if (gcry_md_open(&hd, hash_id, 0))
++	if (crypt_hash_init(&hd, hash_name))
+ 		return 1;
+-	gcry_md_write(hd, (unsigned char *)&iv, sizeof(iv));
+-	gcry_md_write(hd, src, len);
+-	digest = gcry_md_read(hd, hash_id);
+-	memcpy(dst, digest, len);
+-	gcry_md_close(hd);
++	crypt_hash_write(hd, iv_char, sizeof(uint32_t));
++	crypt_hash_write(hd, src, len);
++	crypt_hash_final(hd, dst, len);
++	crypt_hash_destroy(hd);
+ 	return 0;
+ }
+ 
+@@ -56,9 +57,9 @@ static int hash_buf(char *src, char *dst
+  * the help of hash function.
+  */
+ 
+-static int diffuse(char *src, char *dst, size_t size, int hash_id)
++static int diffuse(char *src, char *dst, size_t size, const char *hash_name)
+ {
+-	unsigned int digest_size = gcry_md_get_algo_dlen(hash_id);
++	unsigned int digest_size = crypt_hash_size(hash_name);
+ 	unsigned int i, blocks, padding;
+ 
+ 	blocks = size / digest_size;
+@@ -67,13 +68,13 @@ static int diffuse(char *src, char *dst,
+ 	for (i = 0; i < blocks; i++)
+ 		if(hash_buf(src + digest_size * i,
+ 			    dst + digest_size * i,
+-			    i, digest_size, hash_id))
++			    i, (size_t)digest_size, hash_name))
+ 			return 1;
+ 
+ 	if(padding)
+ 		if(hash_buf(src + digest_size * i,
+ 			    dst + digest_size * i,
+-			    i, padding, hash_id))
++			    i, (size_t)padding, hash_name))
+ 			return 1;
+ 
+ 	return 0;
+@@ -85,15 +86,12 @@ static int diffuse(char *src, char *dst,
+  * must be supplied to AF_merge to recover information.
+  */
+ 
+-int AF_split(char *src, char *dst, size_t blocksize, unsigned int blocknumbers, const char *hash)
++int AF_split(char *src, char *dst, size_t blocksize,
++	     unsigned int blocknumbers, const char *hash)
+ {
+ 	unsigned int i;
+ 	char *bufblock;
+ 	int r = -EINVAL;
+-	int hash_id;
+-
+-	if (!(hash_id = gcry_md_map_name(hash)))
+-		return -EINVAL;
+ 
+ 	if((bufblock = calloc(blocksize, 1)) == NULL) return -ENOMEM;
+ 
+@@ -103,7 +101,7 @@ int AF_split(char *src, char *dst, size_
+ 		if(r < 0) goto out;
+ 
+ 		XORblock(dst+(blocksize*i),bufblock,bufblock,blocksize);
+-		if(diffuse(bufblock, bufblock, blocksize, hash_id))
++		if(diffuse(bufblock, bufblock, blocksize, hash))
+ 			goto out;
+ 	}
+ 	/* the last block is computed */
+@@ -114,15 +112,12 @@ out:
+ 	return r;
+ }
+ 
+-int AF_merge(char *src, char *dst, size_t blocksize, unsigned int blocknumbers, const char *hash)
++int AF_merge(char *src, char *dst, size_t blocksize,
++	     unsigned int blocknumbers, const char *hash)
+ {
+ 	unsigned int i;
+ 	char *bufblock;
+ 	int r = -EINVAL;
+-	int hash_id;
+-
+-	if (!(hash_id = gcry_md_map_name(hash)))
+-		return -EINVAL;
+ 
+ 	if((bufblock = calloc(blocksize, 1)) == NULL)
+ 		return -ENOMEM;
+@@ -130,7 +125,7 @@ int AF_merge(char *src, char *dst, size_
+ 	memset(bufblock,0,blocksize);
+ 	for(i=0; i<blocknumbers-1; i++) {
+ 		XORblock(src+(blocksize*i),bufblock,bufblock,blocksize);
+-		if(diffuse(bufblock, bufblock, blocksize, hash_id))
++		if(diffuse(bufblock, bufblock, blocksize, hash))
+ 			goto out;
+ 	}
+ 	XORblock(src + blocksize * i, bufblock, dst, blocksize);
+--- cryptsetup-1.2.0.old/lib/luks1/Makefile.am	2010-11-14 20:36:29.000000000 +0100
++++ cryptsetup-1.2.0/lib/luks1/Makefile.am	2011-01-10 21:19:00.196168234 +0100
+@@ -16,5 +16,5 @@ libluks1_la_SOURCES = \
+ INCLUDES = -D_GNU_SOURCE			\
+ 	-D_LARGEFILE64_SOURCE                   \
+ 	-D_FILE_OFFSET_BITS=64                  \
+-        -I$(top_srcdir)/lib
+-
++	-I$(top_srcdir)/lib			\
++	-I$(top_srcdir)/lib/crypto_backend
+--- cryptsetup-1.2.0.old/lib/luks1/Makefile.in	2010-12-20 12:35:53.000000000 +0100
++++ cryptsetup-1.2.0/lib/luks1/Makefile.in	2011-01-10 21:19:00.196168234 +0100
+@@ -233,7 +233,8 @@ libluks1_la_SOURCES = \
+ INCLUDES = -D_GNU_SOURCE			\
+ 	-D_LARGEFILE64_SOURCE                   \
+ 	-D_FILE_OFFSET_BITS=64                  \
+-        -I$(top_srcdir)/lib
++	-I$(top_srcdir)/lib			\
++	-I$(top_srcdir)/lib/crypto_backend
+ 
+ all: all-am
+ 
+--- cryptsetup-1.2.0.old/lib/luks1/pbkdf.c	2010-12-09 15:37:54.000000000 +0100
++++ cryptsetup-1.2.0/lib/luks1/pbkdf.c	2011-01-10 21:19:00.197168289 +0100
+@@ -26,14 +26,13 @@
+ #include <errno.h>
+ #include <signal.h>
+ #include <alloca.h>
++#include <string.h>
+ #include <sys/time.h>
+-#include <gcrypt.h>
++#include "crypto_backend.h"
+ 
+ static volatile uint64_t __PBKDF2_global_j = 0;
+ static volatile uint64_t __PBKDF2_performance = 0;
+ 
+-int init_crypto(void);
+-
+ /*
+  * 5.2 PBKDF2
+  *
+@@ -68,12 +67,11 @@ static int pkcs5_pbkdf2(const char *hash
+ 			unsigned int c, unsigned int dkLen,
+ 			char *DK, int perfcheck)
+ {
+-	gcry_md_hd_t prf;
++	struct crypt_hmac *hmac;
+ 	char U[MAX_PRF_BLOCK_LEN];
+ 	char T[MAX_PRF_BLOCK_LEN];
+-	int PRF, i, k, rc = -EINVAL;
++	int i, k, rc = -EINVAL;
+ 	unsigned int u, hLen, l, r;
+-	unsigned char *p;
+ 	size_t tmplen = Slen + 4;
+ 	char *tmp;
+ 
+@@ -81,14 +79,7 @@ static int pkcs5_pbkdf2(const char *hash
+ 	if (tmp == NULL)
+ 		return -ENOMEM;
+ 
+-	if (init_crypto())
+-		return -ENOSYS;
+-
+-	PRF = gcry_md_map_name(hash);
+-	if (PRF == 0)
+-		return -EINVAL;
+-
+-	hLen = gcry_md_get_algo_dlen(PRF);
++	hLen = crypt_hmac_size(hash);
+ 	if (hLen == 0 || hLen > MAX_PRF_BLOCK_LEN)
+ 		return -EINVAL;
+ 
+@@ -168,17 +159,14 @@ static int pkcs5_pbkdf2(const char *hash
+ 	 *
+ 	 */
+ 
+-	if(gcry_md_open(&prf, PRF, GCRY_MD_FLAG_HMAC))
++	if (crypt_hmac_init(&hmac, hash, P, Plen))
+ 		return -EINVAL;
+ 
+-	if (gcry_md_setkey(prf, P, Plen))
+-		goto out;
+-
+ 	for (i = 1; (uint) i <= l; i++) {
+ 		memset(T, 0, hLen);
+ 
+ 		for (u = 1; u <= c ; u++) {
+-			gcry_md_reset(prf);
++			crypt_hmac_restart(hmac);
+ 
+ 			if (u == 1) {
+ 				memcpy(tmp, S, Slen);
+@@ -187,16 +175,12 @@ static int pkcs5_pbkdf2(const char *hash
+ 				tmp[Slen + 2] = (i & 0x0000ff00) >> 8;
+ 				tmp[Slen + 3] = (i & 0x000000ff) >> 0;
+ 
+-				gcry_md_write(prf, tmp, tmplen);
++				crypt_hmac_write(hmac, tmp, tmplen);
+ 			} else {
+-				gcry_md_write(prf, U, hLen);
++				crypt_hmac_write(hmac, U, hLen);
+ 			}
+ 
+-			p = gcry_md_read(prf, PRF);
+-			if (p == NULL)
+-				goto out;
+-
+-			memcpy(U, p, hLen);
++			crypt_hmac_final(hmac, U, hLen);
+ 
+ 			for (k = 0; (uint) k < hLen; k++)
+ 				T[k] ^= U[k];
+@@ -214,7 +198,7 @@ static int pkcs5_pbkdf2(const char *hash
+ 	}
+ 	rc = 0;
+ out:
+-	gcry_md_close(prf);
++	crypt_hmac_destroy(hmac);
+ 	return rc;
+ }
+ 
+@@ -229,13 +213,7 @@ int PBKDF2_HMAC(const char *hash,
+ 
+ int PBKDF2_HMAC_ready(const char *hash)
+ {
+-	int hash_id = gcry_md_map_name(hash);
+-
+-	if (!hash_id)
+-		return -EINVAL;
+-
+-	/* Used hash must have at least 160 bits */
+-	if (gcry_md_get_algo_dlen(hash_id) < 20)
++	if (crypt_hmac_size(hash) < 20)
+ 		return -EINVAL;
+ 
+ 	return 1;
+--- cryptsetup-1.2.0.old/lib/Makefile.am	2010-12-09 15:37:54.000000000 +0100
++++ cryptsetup-1.2.0/lib/Makefile.am	2011-01-10 21:19:00.197168289 +0100
+@@ -7,6 +7,7 @@ pkgconfig_DATA = libcryptsetup.pc
+ 
+ INCLUDES = \
+ 	-I$(top_srcdir)				\
++	-I$(top_srcdir)/lib/crypto_backend	\
+ 	-I$(top_srcdir)/lib/luks1		\
+ 	-DDATADIR=\""$(datadir)"\"		\
+ 	-DLIBDIR=\""$(libdir)"\"		\
+@@ -43,11 +44,12 @@ libcryptsetup_la_SOURCES = \
+ 	utils_crypt.c				\
+ 	utils_crypt.h				\
+ 	utils_debug.c				\
+-	backends.c				\
+ 	libdevmapper.c				\
+ 	volumekey.c				\
+ 	random.c				\
+-	gcrypt.c
++	crypt_plain.c				\
++	crypto_backend/crypto_backend.h		\
++	crypto_backend/crypto_gcrypt.c
+ 
+ include_HEADERS = libcryptsetup.h
+ 
+--- cryptsetup-1.2.0.old/lib/Makefile.in	2010-12-20 12:35:53.000000000 +0100
++++ cryptsetup-1.2.0/lib/Makefile.in	2011-01-10 21:19:00.197168289 +0100
+@@ -80,9 +80,10 @@ am__installdirs = "$(DESTDIR)$(libdir)" 
+ LTLIBRARIES = $(lib_LTLIBRARIES)
+ am_libcryptsetup_la_OBJECTS = libcryptsetup_la-setup.lo \
+ 	libcryptsetup_la-utils.lo libcryptsetup_la-utils_crypt.lo \
+-	libcryptsetup_la-utils_debug.lo libcryptsetup_la-backends.lo \
++	libcryptsetup_la-utils_debug.lo \
+ 	libcryptsetup_la-libdevmapper.lo libcryptsetup_la-volumekey.lo \
+-	libcryptsetup_la-random.lo libcryptsetup_la-gcrypt.lo
++	libcryptsetup_la-random.lo libcryptsetup_la-crypt_plain.lo \
++	libcryptsetup_la-crypto_gcrypt.lo
+ libcryptsetup_la_OBJECTS = $(am_libcryptsetup_la_OBJECTS)
+ libcryptsetup_la_LINK = $(LIBTOOL) --tag=CC $(AM_LIBTOOLFLAGS) \
+ 	$(LIBTOOLFLAGS) --mode=link $(CCLD) $(libcryptsetup_la_CFLAGS) \
+@@ -292,6 +293,7 @@ pkgconfigdir = $(libdir)/pkgconfig
+ pkgconfig_DATA = libcryptsetup.pc
+ INCLUDES = \
+ 	-I$(top_srcdir)				\
++	-I$(top_srcdir)/lib/crypto_backend	\
+ 	-I$(top_srcdir)/lib/luks1		\
+ 	-DDATADIR=\""$(datadir)"\"		\
+ 	-DLIBDIR=\""$(libdir)"\"		\
+@@ -325,11 +327,12 @@ libcryptsetup_la_SOURCES = \
+ 	utils_crypt.c				\
+ 	utils_crypt.h				\
+ 	utils_debug.c				\
+-	backends.c				\
+ 	libdevmapper.c				\
+ 	volumekey.c				\
+ 	random.c				\
+-	gcrypt.c
++	crypt_plain.c				\
++	crypto_backend/crypto_backend.h		\
++	crypto_backend/crypto_gcrypt.c
+ 
+ include_HEADERS = libcryptsetup.h
+ EXTRA_DIST = libcryptsetup.pc.in libcryptsetup.sym
+@@ -409,8 +412,8 @@ mostlyclean-compile:
+ distclean-compile:
+ 	-rm -f *.tab.c
+ 
+-@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libcryptsetup_la-backends.Plo@am__quote@
+-@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libcryptsetup_la-gcrypt.Plo@am__quote@
++@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libcryptsetup_la-crypt_plain.Plo@am__quote@
++@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libcryptsetup_la-crypto_gcrypt.Plo@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libcryptsetup_la-libdevmapper.Plo@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libcryptsetup_la-random.Plo@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libcryptsetup_la-setup.Plo@am__quote@
+@@ -468,13 +471,6 @@ libcryptsetup_la-utils_debug.lo: utils_d
+ @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+ @am__fastdepCC_FALSE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libcryptsetup_la_CFLAGS) $(CFLAGS) -c -o libcryptsetup_la-utils_debug.lo `test -f 'utils_debug.c' || echo '$(srcdir)/'`utils_debug.c
+ 
+-libcryptsetup_la-backends.lo: backends.c
+-@am__fastdepCC_TRUE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libcryptsetup_la_CFLAGS) $(CFLAGS) -MT libcryptsetup_la-backends.lo -MD -MP -MF $(DEPDIR)/libcryptsetup_la-backends.Tpo -c -o libcryptsetup_la-backends.lo `test -f 'backends.c' || echo '$(srcdir)/'`backends.c
+-@am__fastdepCC_TRUE@	$(am__mv) $(DEPDIR)/libcryptsetup_la-backends.Tpo $(DEPDIR)/libcryptsetup_la-backends.Plo
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='backends.c' object='libcryptsetup_la-backends.lo' libtool=yes @AMDEPBACKSLASH@
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+-@am__fastdepCC_FALSE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libcryptsetup_la_CFLAGS) $(CFLAGS) -c -o libcryptsetup_la-backends.lo `test -f 'backends.c' || echo '$(srcdir)/'`backends.c
+-
+ libcryptsetup_la-libdevmapper.lo: libdevmapper.c
+ @am__fastdepCC_TRUE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libcryptsetup_la_CFLAGS) $(CFLAGS) -MT libcryptsetup_la-libdevmapper.lo -MD -MP -MF $(DEPDIR)/libcryptsetup_la-libdevmapper.Tpo -c -o libcryptsetup_la-libdevmapper.lo `test -f 'libdevmapper.c' || echo '$(srcdir)/'`libdevmapper.c
+ @am__fastdepCC_TRUE@	$(am__mv) $(DEPDIR)/libcryptsetup_la-libdevmapper.Tpo $(DEPDIR)/libcryptsetup_la-libdevmapper.Plo
+@@ -496,12 +492,19 @@ libcryptsetup_la-random.lo: random.c
+ @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+ @am__fastdepCC_FALSE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libcryptsetup_la_CFLAGS) $(CFLAGS) -c -o libcryptsetup_la-random.lo `test -f 'random.c' || echo '$(srcdir)/'`random.c
+ 
+-libcryptsetup_la-gcrypt.lo: gcrypt.c
+-@am__fastdepCC_TRUE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libcryptsetup_la_CFLAGS) $(CFLAGS) -MT libcryptsetup_la-gcrypt.lo -MD -MP -MF $(DEPDIR)/libcryptsetup_la-gcrypt.Tpo -c -o libcryptsetup_la-gcrypt.lo `test -f 'gcrypt.c' || echo '$(srcdir)/'`gcrypt.c
+-@am__fastdepCC_TRUE@	$(am__mv) $(DEPDIR)/libcryptsetup_la-gcrypt.Tpo $(DEPDIR)/libcryptsetup_la-gcrypt.Plo
+-@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='gcrypt.c' object='libcryptsetup_la-gcrypt.lo' libtool=yes @AMDEPBACKSLASH@
++libcryptsetup_la-crypt_plain.lo: crypt_plain.c
++@am__fastdepCC_TRUE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libcryptsetup_la_CFLAGS) $(CFLAGS) -MT libcryptsetup_la-crypt_plain.lo -MD -MP -MF $(DEPDIR)/libcryptsetup_la-crypt_plain.Tpo -c -o libcryptsetup_la-crypt_plain.lo `test -f 'crypt_plain.c' || echo '$(srcdir)/'`crypt_plain.c
++@am__fastdepCC_TRUE@	$(am__mv) $(DEPDIR)/libcryptsetup_la-crypt_plain.Tpo $(DEPDIR)/libcryptsetup_la-crypt_plain.Plo
++@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='crypt_plain.c' object='libcryptsetup_la-crypt_plain.lo' libtool=yes @AMDEPBACKSLASH@
++@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
++@am__fastdepCC_FALSE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libcryptsetup_la_CFLAGS) $(CFLAGS) -c -o libcryptsetup_la-crypt_plain.lo `test -f 'crypt_plain.c' || echo '$(srcdir)/'`crypt_plain.c
++
++libcryptsetup_la-crypto_gcrypt.lo: crypto_backend/crypto_gcrypt.c
++@am__fastdepCC_TRUE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libcryptsetup_la_CFLAGS) $(CFLAGS) -MT libcryptsetup_la-crypto_gcrypt.lo -MD -MP -MF $(DEPDIR)/libcryptsetup_la-crypto_gcrypt.Tpo -c -o libcryptsetup_la-crypto_gcrypt.lo `test -f 'crypto_backend/crypto_gcrypt.c' || echo '$(srcdir)/'`crypto_backend/crypto_gcrypt.c
++@am__fastdepCC_TRUE@	$(am__mv) $(DEPDIR)/libcryptsetup_la-crypto_gcrypt.Tpo $(DEPDIR)/libcryptsetup_la-crypto_gcrypt.Plo
++@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='crypto_backend/crypto_gcrypt.c' object='libcryptsetup_la-crypto_gcrypt.lo' libtool=yes @AMDEPBACKSLASH@
+ @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+-@am__fastdepCC_FALSE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libcryptsetup_la_CFLAGS) $(CFLAGS) -c -o libcryptsetup_la-gcrypt.lo `test -f 'gcrypt.c' || echo '$(srcdir)/'`gcrypt.c
++@am__fastdepCC_FALSE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libcryptsetup_la_CFLAGS) $(CFLAGS) -c -o libcryptsetup_la-crypto_gcrypt.lo `test -f 'crypto_backend/crypto_gcrypt.c' || echo '$(srcdir)/'`crypto_backend/crypto_gcrypt.c
+ 
+ mostlyclean-libtool:
+ 	-rm -f *.lo
+--- cryptsetup-1.2.0.old/lib/random.c	2010-11-15 14:34:20.000000000 +0100
++++ cryptsetup-1.2.0/lib/random.c	2011-01-10 21:19:58.683105818 +0100
+@@ -144,6 +144,9 @@ static int _get_random(struct crypt_devi
+ /* Initialisation of both RNG file descriptors is mandatory */
+ int crypt_random_init(struct crypt_device *ctx)
+ {
++	if (random_initialised)
++		return 0;
++
+ 	/* Used for CRYPT_RND_NORMAL */
+ 	if(urandom_fd == -1)
+ 		urandom_fd = open(URANDOM_DEVICE, O_RDONLY);
+--- cryptsetup-1.2.0.old/lib/setup.c	2010-12-09 15:37:54.000000000 +0100
++++ cryptsetup-1.2.0/lib/setup.c	2011-01-10 21:19:00.198168313 +0100
+@@ -8,6 +8,7 @@
+ #include "libcryptsetup.h"
+ #include "luks.h"
+ #include "internal.h"
++#include "crypto_backend.h"
+ 
+ struct crypt_device {
+ 	char *type;
+@@ -85,6 +86,23 @@ void logger(struct crypt_device *cd, int
+ 	free(target);
+ }
+ 
++static int init_crypto(struct crypt_device *ctx)
++{
++	int r;
++
++	r = crypt_random_init(ctx);
++	if (r < 0) {
++		log_err(ctx, _("Cannot initialize crypto RNG backend.\n"));
++		return r;
++	}
++
++	r = crypt_backend_init(ctx);
++	if (r < 0)
++		log_err(ctx, _("Cannot initialize crypto backend.\n"));
++
++	return r;
++}
++
+ /*
+  * Password processing behaviour matrix of process_key
+  *
+@@ -117,7 +135,7 @@ static char *process_key(struct crypt_de
+ 
+ 	/* key is coming from tty, fd or binary stdin */
+ 	if (hash_name) {
+-		if (hash(NULL, hash_name, key, key_size, pass, passLen) < 0) {
++		if (crypt_plain_hash(cd, hash_name, key, key_size, pass, passLen) < 0) {
+ 			log_err(cd, _("Key processing error (using hash algorithm %s).\n"),
+ 				hash_name);
+ 			crypt_safe_free(key);
