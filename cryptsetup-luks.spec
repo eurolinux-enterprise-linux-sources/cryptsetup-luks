@@ -6,7 +6,7 @@
 Summary: A utility for setting up encrypted filesystems
 Name: cryptsetup-luks
 Version: 1.2.0
-Release: 6%{?dist}
+Release: 7%{?dist}
 License: GPLv2
 Group: Applications/System
 URL: http://cryptsetup.googlecode.com/
@@ -28,6 +28,8 @@ Source0: http://cryptsetup.googlecode.com/files/cryptsetup-%{upstream_version}.t
 Patch0: cryptsetup-crypto-backend.patch
 Patch1: cryptsetup-fipscheck.patch
 Patch2: cryptsetup-1.3.2-status.patch
+Patch3: cryptsetup-1.3.3-fix-device-lookup.patch
+Patch4: cryptsetup-1.4.1-fix-duplicate-status.patch
 
 %description
 This package contains cryptsetup, a utility for setting up
@@ -60,6 +62,8 @@ This package contains the cryptsetup shared library, libcryptsetup.
 %patch1 -p1
 %endif
 %patch2 -p1
+%patch3 -p1
+%patch4 -p1
 
 iconv -f latin1 -t utf8 ChangeLog > ChangeLog.new
 mv -f ChangeLog.new ChangeLog 
@@ -126,6 +130,11 @@ popd
 rm -rf $RPM_BUILD_ROOT
 
 %changelog
+* Wed Feb 29 2012 Milan Broz <mbroz@redhat.com> - 1.2.0-7
+- Fix device lookup function.
+- Fix duplicate directories displayed in status output.
+  Resolves: #755478 #746648
+
 * Mon Aug 29 2011 Milan Broz <mbroz@redhat.com> - 1.2.0-6
 - Fix return code for status command when device doesn't exists.
   Resolves: #732179

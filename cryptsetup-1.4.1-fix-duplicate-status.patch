@@ -1,0 +1,49 @@
+--- cryptsetup-1.2.0.old/src/cryptsetup.c	2012-02-29 13:09:30.000000000 +0100
++++ cryptsetup-1.2.0/src/cryptsetup.c	2012-02-29 13:10:26.017473759 +0100
+@@ -5,6 +5,8 @@
+ #include <stdarg.h>
+ #include <inttypes.h>
+ #include <errno.h>
++#include <sys/types.h>
++#include <sys/stat.h>
+ #include <unistd.h>
+ #include <fcntl.h>
+ #include <assert.h>
+@@ -285,7 +287,12 @@ static int action_status(int arg)
+ 	crypt_status_info ci;
+ 	struct crypt_active_device cad;
+ 	struct crypt_device *cd = NULL;
+-	int r = 0;
++	struct stat st;
++	int path = 0, r = 0;
++
++	/* perhaps a path, not a dm device name */
++	if (strchr(action_argv[0], '/') && !stat(action_argv[0], &st))
++		path = 1;
+ 
+ 	ci = crypt_status(NULL, action_argv[0]);
+ 	switch (ci) {
+@@ -293,13 +300,20 @@ static int action_status(int arg)
+ 		r = -EINVAL;
+ 		break;
+ 	case CRYPT_INACTIVE:
+-		log_std("%s/%s is inactive.\n", crypt_get_dir(), action_argv[0]);
++		if (path)
++			log_std("%s is inactive.\n", action_argv[0]);
++		else
++			log_std("%s/%s is inactive.\n", crypt_get_dir(), action_argv[0]);
+ 		r = -ENODEV;
+ 		break;
+ 	case CRYPT_ACTIVE:
+ 	case CRYPT_BUSY:
+-		log_std("%s/%s is active%s.\n", crypt_get_dir(), action_argv[0],
+-			ci == CRYPT_BUSY ? " and is in use" : "");
++		if (path)
++			log_std("%s is active%s.\n", action_argv[0],
++				ci == CRYPT_BUSY ? " and is in use" : "");
++		else
++			log_std("%s/%s is active%s.\n", crypt_get_dir(), action_argv[0],
++				ci == CRYPT_BUSY ? " and is in use" : "");
+ 		r = crypt_init_by_name(&cd, action_argv[0]);
+ 		if (r < 0 || !crypt_get_type(cd))
+ 			goto out;
