@@ -1,0 +1,25 @@
+--- cryptsetup-1.2.0.old/src/cryptsetup.c	2011-08-29 12:55:16.000000000 +0200
++++ cryptsetup-1.2.0/src/cryptsetup.c	2011-08-29 12:55:45.048239402 +0200
+@@ -290,10 +290,11 @@ static int action_status(int arg)
+ 	ci = crypt_status(NULL, action_argv[0]);
+ 	switch (ci) {
+ 	case CRYPT_INVALID:
+-		r = -ENODEV;
++		r = -EINVAL;
+ 		break;
+ 	case CRYPT_INACTIVE:
+ 		log_std("%s/%s is inactive.\n", crypt_get_dir(), action_argv[0]);
++		r = -ENODEV;
+ 		break;
+ 	case CRYPT_ACTIVE:
+ 	case CRYPT_BUSY:
+--- cryptsetup-1.2.0.old/tests/compat-test	2010-12-09 17:05:35.000000000 +0100
++++ cryptsetup-1.2.0/tests/compat-test	2011-08-29 12:56:51.669136499 +0200
+@@ -243,6 +243,7 @@ $CRYPTSETUP -q status  $DEV_NAME | grep
+ $CRYPTSETUP -q resize  $DEV_NAME || fail
+ $CRYPTSETUP -q status  $DEV_NAME | grep "size:" | grep -q "19997 sectors" || fail
+ $CRYPTSETUP -q remove  $DEV_NAME || fail
++$CRYPTSETUP -q status  $DEV_NAME >/dev/null && fail
+ echo "key0" | $CRYPTSETUP create $DEV_NAME $LOOPDEV || fail
+ $CRYPTSETUP -q remove  $DEV_NAME || fail
+ echo "key0" | $CRYPTSETUP -q create $DEV_NAME $LOOPDEV || fail

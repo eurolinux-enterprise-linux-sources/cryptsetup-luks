@@ -6,7 +6,7 @@
 Summary: A utility for setting up encrypted filesystems
 Name: cryptsetup-luks
 Version: 1.2.0
-Release: 3%{?dist}.2
+Release: 6%{?dist}
 License: GPLv2
 Group: Applications/System
 URL: http://cryptsetup.googlecode.com/
@@ -27,6 +27,7 @@ Requires: cryptsetup-luks-libs = %{version}-%{release}
 Source0: http://cryptsetup.googlecode.com/files/cryptsetup-%{upstream_version}.tar.bz2
 Patch0: cryptsetup-crypto-backend.patch
 Patch1: cryptsetup-fipscheck.patch
+Patch2: cryptsetup-1.3.2-status.patch
 
 %description
 This package contains cryptsetup, a utility for setting up
@@ -58,6 +59,7 @@ This package contains the cryptsetup shared library, libcryptsetup.
 %if %{enable_fips}
 %patch1 -p1
 %endif
+%patch2 -p1
 
 iconv -f latin1 -t utf8 ChangeLog > ChangeLog.new
 mv -f ChangeLog.new ChangeLog 
@@ -124,13 +126,17 @@ popd
 rm -rf $RPM_BUILD_ROOT
 
 %changelog
-* Wed Jun 15 2011 Milan Broz <mbroz@redhat.com> - 1.2.0-3.el6_1.2
-- Move informational FIPS mode message to verbose mode.
-  Resolves: #713456
+* Mon Aug 29 2011 Milan Broz <mbroz@redhat.com> - 1.2.0-6
+- Fix return code for status command when device doesn't exists.
+  Resolves: #732179
 
-* Thu Jun 02 2011 Milan Broz <mbroz@redhat.com> - 1.2.0-3.el6_1.1
+* Wed Jun 15 2011 Milan Broz <mbroz@redhat.com> - 1.2.0-5
+- Move informational FIPS mode message to verbose mode.
+  Resolves: #713410
+
+* Mon May 09 2011 Milan Broz <mbroz@redhat.com> - 1.2.0-4
 - Disable volume key access function in FIPS mode.
-  Resolves: #709055
+  Resolves: #701936
 
 * Mon Apr 04 2011 Milan Broz <mbroz@redhat.com> - 1.2.0-3
 - Require updated device mapper library (secure flag).
