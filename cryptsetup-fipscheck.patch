@@ -1,5 +1,6 @@
---- cryptsetup-1.2.0.old/lib/crypto_backend/crypto_backend.h	2011-02-07 16:25:56.000000000 +0100
-+++ cryptsetup-1.2.0/lib/crypto_backend/crypto_backend.h	2011-02-07 16:26:36.119607358 +0100
+diff -rupN cryptsetup-1.2.0.old/lib/crypto_backend/crypto_backend.h cryptsetup-1.2.0/lib/crypto_backend/crypto_backend.h
+--- cryptsetup-1.2.0.old/lib/crypto_backend/crypto_backend.h	2014-06-23 15:24:54.473981999 +0200
++++ cryptsetup-1.2.0/lib/crypto_backend/crypto_backend.h	2014-06-23 15:25:13.692901901 +0200
 @@ -30,4 +30,7 @@ int crypt_hmac_write(struct crypt_hmac *
  int crypt_hmac_final(struct crypt_hmac *ctx, char *buffer, size_t length);
  int crypt_hmac_destroy(struct crypt_hmac *ctx);
@@ -8,14 +9,11 @@
 +int crypt_backend_rng(char *buffer, size_t length);
 +
  #endif /* _CRYPTO_BACKEND_H */
---- cryptsetup-1.2.0.old/lib/crypto_backend/crypto_gcrypt.c	2011-02-07 16:25:56.000000000 +0100
-+++ cryptsetup-1.2.0/lib/crypto_backend/crypto_gcrypt.c	2011-02-07 16:26:36.119607358 +0100
-@@ -21,9 +21,11 @@
- #include <errno.h>
- #include <assert.h>
+diff -rupN cryptsetup-1.2.0.old/lib/crypto_backend/crypto_gcrypt.c cryptsetup-1.2.0/lib/crypto_backend/crypto_gcrypt.c
+--- cryptsetup-1.2.0.old/lib/crypto_backend/crypto_gcrypt.c	2014-06-23 15:24:54.473981999 +0200
++++ cryptsetup-1.2.0/lib/crypto_backend/crypto_gcrypt.c	2014-06-23 15:25:13.692901901 +0200
+@@ -23,7 +23,7 @@
  #include <gcrypt.h>
-+#include <fipscheck.h>
-+#include <stdlib.h>
  #include "crypto_backend.h"
  
 -#define GCRYPT_REQ_VERSION "1.1.42"
@@ -23,23 +21,7 @@
  
  static int crypto_backend_initialised = 0;
  
-@@ -45,6 +47,15 @@ int crypt_backend_init(struct crypt_devi
- 		return 0;
- 
- 	log_dbg("Initialising gcrypt crypto backend.");
-+
-+	if (FIPSCHECK_kernel_fips_mode()) {
-+		if (!FIPSCHECK_verify("libcryptsetup.so.1", "crypt_init")) {
-+			log_err(ctx, "FIPS checksum verification failed.\n");
-+			exit(EXIT_FAILURE);
-+		}
-+		log_verbose(ctx, "Running in FIPS mode.\n");
-+	}
-+
- 	if (!gcry_control (GCRYCTL_INITIALIZATION_FINISHED_P)) {
- 		if (!gcry_check_version (GCRYPT_REQ_VERSION)) {
- 			return -ENOSYS;
-@@ -225,3 +236,11 @@ int crypt_hmac_destroy(struct crypt_hmac
+@@ -225,3 +225,11 @@ int crypt_hmac_destroy(struct crypt_hmac
  	free(ctx);
  	return 0;
  }
@@ -51,8 +33,9 @@
 +	gcry_randomize(buffer, length, GCRY_VERY_STRONG_RANDOM);
 +	return 0;
 +}
+diff -rupN cryptsetup-1.2.0.old/lib/libdevmapper.c cryptsetup-1.2.0/lib/libdevmapper.c
 --- cryptsetup-1.2.0.old/lib/libdevmapper.c	2010-10-27 10:21:23.000000000 +0200
-+++ cryptsetup-1.2.0/lib/libdevmapper.c	2011-02-07 16:26:36.119607358 +0100
++++ cryptsetup-1.2.0/lib/libdevmapper.c	2014-06-23 15:25:13.693901898 +0200
 @@ -461,6 +461,8 @@ int dm_create_device(const char *name,
  			goto out_no_removal;
  	}
@@ -81,94 +64,9 @@
  	if (name && !dm_task_set_name(dmt, name))
  		goto out;
  
---- cryptsetup-1.2.0.old/lib/Makefile.am	2011-02-07 16:25:56.000000000 +0100
-+++ cryptsetup-1.2.0/lib/Makefile.am	2011-02-07 16:26:36.119607358 +0100
-@@ -32,6 +32,7 @@ libcryptsetup_la_LIBADD = \
- 	@UUID_LIBS@				\
- 	@DEVMAPPER_LIBS@			\
- 	@LIBGCRYPT_LIBS@			\
-+	-lfipscheck				\
- 	luks1/libluks1.la
- 
- libcryptsetup_la_SOURCES = \
---- cryptsetup-1.2.0.old/lib/Makefile.in	2011-02-07 16:25:56.000000000 +0100
-+++ cryptsetup-1.2.0/lib/Makefile.in	2011-02-07 16:26:36.119607358 +0100
-@@ -315,6 +315,7 @@ libcryptsetup_la_LIBADD = \
- 	@UUID_LIBS@				\
- 	@DEVMAPPER_LIBS@			\
- 	@LIBGCRYPT_LIBS@			\
-+	-lfipscheck				\
- 	luks1/libluks1.la
- 
- libcryptsetup_la_SOURCES = \
---- cryptsetup-1.2.0.old/lib/random.c	2011-02-07 16:25:56.000000000 +0100
-+++ cryptsetup-1.2.0/lib/random.c	2011-02-07 16:26:36.119607358 +0100
-@@ -22,7 +22,9 @@
- #include <fcntl.h>
- #include <errno.h>
- #include <assert.h>
-+#include <fipscheck.h>
- 
-+#include "crypto_backend.h"
- #include "libcryptsetup.h"
- #include "internal.h"
- 
-@@ -176,6 +178,10 @@ int crypt_random_get(struct crypt_device
- 		status = _get_urandom(ctx, buf, len);
- 		break;
- 	case CRYPT_RND_KEY:
-+		if (FIPSCHECK_kernel_fips_mode()) {
-+			status = crypt_backend_rng(buf, len);
-+			break;
-+		}
- 		rng_type = ctx ? crypt_get_rng_type(ctx) :
- 				 crypt_random_default_key_rng();
- 		switch (rng_type) {
---- cryptsetup-1.2.0.old/src/cryptsetup.c	2010-12-09 19:14:25.000000000 +0100
-+++ cryptsetup-1.2.0/src/cryptsetup.c	2011-02-07 16:26:36.119607358 +0100
-@@ -8,6 +8,7 @@
- #include <unistd.h>
- #include <fcntl.h>
- #include <assert.h>
-+#include <fipscheck.h>
- 
- #include <libcryptsetup.h>
- #include <popt.h>
-@@ -957,6 +958,12 @@ int main(int argc, char **argv)
- 	bindtextdomain(PACKAGE, LOCALEDIR);
- 	textdomain(PACKAGE);
- 
-+	if (FIPSCHECK_kernel_fips_mode() &&
-+	    !FIPSCHECK_verify(NULL, NULL)) {
-+		log_err("FIPS checksum verification failed.\n");
-+		exit(EXIT_FAILURE);
-+	}
-+
- 	popt_context = poptGetContext(PACKAGE, argc, (const char **)argv,
- 	                              popt_options, 0);
- 	poptSetOtherOptionHelp(popt_context,
---- cryptsetup-1.2.0.old/src/Makefile.am	2010-10-27 10:21:23.000000000 +0200
-+++ cryptsetup-1.2.0/src/Makefile.am	2011-02-07 16:26:36.119607358 +0100
-@@ -16,6 +16,7 @@ cryptsetup_SOURCES = \
- 
- cryptsetup_LDADD = \
- 	$(top_builddir)/lib/libcryptsetup.la	\
-+	-lfipscheck				\
- 	@POPT_LIBS@
- 
- cryptsetup_CFLAGS = -Wall
---- cryptsetup-1.2.0.old/src/Makefile.in	2010-12-20 12:35:53.000000000 +0100
-+++ cryptsetup-1.2.0/src/Makefile.in	2011-02-07 16:26:36.129605521 +0100
-@@ -255,6 +255,7 @@ cryptsetup_SOURCES = \
- 
- cryptsetup_LDADD = \
- 	$(top_builddir)/lib/libcryptsetup.la	\
-+	-lfipscheck				\
- 	@POPT_LIBS@
- 
- cryptsetup_CFLAGS = -Wall
+diff -rupN cryptsetup-1.2.0.old/lib/luks1/keymanage.c cryptsetup-1.2.0/lib/luks1/keymanage.c
 --- cryptsetup-1.2.0.old/lib/luks1/keymanage.c	2010-11-14 21:02:22.000000000 +0100
-+++ cryptsetup-1.2.0/lib/luks1/keymanage.c	2011-04-04 21:28:29.276359839 +0200
++++ cryptsetup-1.2.0/lib/luks1/keymanage.c	2014-06-23 15:25:13.693901898 +0200
 @@ -543,7 +543,7 @@ int LUKS_set_key(const char *device, uns
  	log_dbg("Key slot %d use %d password iterations.", keyIndex, hdr->keyblock[keyIndex].passwordIterations);
  
@@ -178,21 +76,123 @@
  	if(r < 0) return r;
  
  //	assert((vk->keylength % TWOFISH_BLOCKSIZE) == 0); FIXME
---- cryptsetup-1.2.0.old/lib/setup.c	2011-05-07 17:33:04.000000000 +0200
-+++ cryptsetup-1.2.0/lib/setup.c	2011-05-07 17:37:23.599499739 +0200
-@@ -4,6 +4,7 @@
- #include <stdarg.h>
- #include <fcntl.h>
- #include <errno.h>
-+#include <fipscheck.h>
+diff -rupN cryptsetup-1.2.0.old/lib/Makefile.am cryptsetup-1.2.0/lib/Makefile.am
+--- cryptsetup-1.2.0.old/lib/Makefile.am	2014-06-23 15:24:54.476981986 +0200
++++ cryptsetup-1.2.0/lib/Makefile.am	2014-06-23 15:25:13.693901898 +0200
+@@ -32,6 +32,7 @@ libcryptsetup_la_LIBADD = \
+ 	@UUID_LIBS@				\
+ 	@DEVMAPPER_LIBS@			\
+ 	@LIBGCRYPT_LIBS@			\
++	-lfipscheck				\
+ 	luks1/libluks1.la
  
+ libcryptsetup_la_SOURCES = \
+@@ -49,7 +50,9 @@ libcryptsetup_la_SOURCES = \
+ 	random.c				\
+ 	crypt_plain.c				\
+ 	crypto_backend/crypto_backend.h		\
+-	crypto_backend/crypto_gcrypt.c
++	crypto_backend/crypto_gcrypt.c		\
++	utils_fips.h				\
++	utils_fips.c
+ 
+ include_HEADERS = libcryptsetup.h
+ 
+diff -rupN cryptsetup-1.2.0.old/lib/Makefile.in cryptsetup-1.2.0/lib/Makefile.in
+--- cryptsetup-1.2.0.old/lib/Makefile.in	2014-06-23 15:24:54.477981982 +0200
++++ cryptsetup-1.2.0/lib/Makefile.in	2014-06-23 15:25:13.693901898 +0200
+@@ -83,7 +83,8 @@ am_libcryptsetup_la_OBJECTS = libcryptse
+ 	libcryptsetup_la-utils_debug.lo \
+ 	libcryptsetup_la-libdevmapper.lo libcryptsetup_la-volumekey.lo \
+ 	libcryptsetup_la-random.lo libcryptsetup_la-crypt_plain.lo \
+-	libcryptsetup_la-crypto_gcrypt.lo
++	libcryptsetup_la-crypto_gcrypt.lo \
++	libcryptsetup_la-utils_fips.lo
+ libcryptsetup_la_OBJECTS = $(am_libcryptsetup_la_OBJECTS)
+ libcryptsetup_la_LINK = $(LIBTOOL) --tag=CC $(AM_LIBTOOLFLAGS) \
+ 	$(LIBTOOLFLAGS) --mode=link $(CCLD) $(libcryptsetup_la_CFLAGS) \
+@@ -315,6 +316,7 @@ libcryptsetup_la_LIBADD = \
+ 	@UUID_LIBS@				\
+ 	@DEVMAPPER_LIBS@			\
+ 	@LIBGCRYPT_LIBS@			\
++	-lfipscheck				\
+ 	luks1/libluks1.la
+ 
+ libcryptsetup_la_SOURCES = \
+@@ -332,7 +334,9 @@ libcryptsetup_la_SOURCES = \
+ 	random.c				\
+ 	crypt_plain.c				\
+ 	crypto_backend/crypto_backend.h		\
+-	crypto_backend/crypto_gcrypt.c
++	crypto_backend/crypto_gcrypt.c		\
++	utils_fips.h				\
++	utils_fips.c
+ 
+ include_HEADERS = libcryptsetup.h
+ EXTRA_DIST = libcryptsetup.pc.in libcryptsetup.sym
+@@ -420,6 +424,7 @@ distclean-compile:
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libcryptsetup_la-utils.Plo@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libcryptsetup_la-utils_crypt.Plo@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libcryptsetup_la-utils_debug.Plo@am__quote@
++@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libcryptsetup_la-utils_fips.Plo@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libcryptsetup_la-volumekey.Plo@am__quote@
+ 
+ .c.o:
+@@ -506,6 +511,13 @@ libcryptsetup_la-crypto_gcrypt.lo: crypt
+ @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+ @am__fastdepCC_FALSE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libcryptsetup_la_CFLAGS) $(CFLAGS) -c -o libcryptsetup_la-crypto_gcrypt.lo `test -f 'crypto_backend/crypto_gcrypt.c' || echo '$(srcdir)/'`crypto_backend/crypto_gcrypt.c
+ 
++libcryptsetup_la-utils_fips.lo: utils_fips.c
++@am__fastdepCC_TRUE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libcryptsetup_la_CFLAGS) $(CFLAGS) -MT libcryptsetup_la-utils_fips.lo -MD -MP -MF $(DEPDIR)/libcryptsetup_la-utils_fips.Tpo -c -o libcryptsetup_la-utils_fips.lo `test -f 'utils_fips.c' || echo '$(srcdir)/'`utils_fips.c
++@am__fastdepCC_TRUE@	$(am__mv) $(DEPDIR)/libcryptsetup_la-utils_fips.Tpo $(DEPDIR)/libcryptsetup_la-utils_fips.Plo
++@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='utils_fips.c' object='libcryptsetup_la-utils_fips.lo' libtool=yes @AMDEPBACKSLASH@
++@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
++@am__fastdepCC_FALSE@	$(LIBTOOL)  --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(libcryptsetup_la_CFLAGS) $(CFLAGS) -c -o libcryptsetup_la-utils_fips.lo `test -f 'utils_fips.c' || echo '$(srcdir)/'`utils_fips.c
++
+ mostlyclean-libtool:
+ 	-rm -f *.lo
+ 
+diff -rupN cryptsetup-1.2.0.old/lib/random.c cryptsetup-1.2.0/lib/random.c
+--- cryptsetup-1.2.0.old/lib/random.c	2014-06-23 15:24:54.477981982 +0200
++++ cryptsetup-1.2.0/lib/random.c	2014-06-23 15:25:13.694901894 +0200
+@@ -23,8 +23,10 @@
+ #include <errno.h>
+ #include <assert.h>
+ 
++#include "crypto_backend.h"
  #include "libcryptsetup.h"
+ #include "internal.h"
++#include "utils_fips.h"
+ 
+ static int random_initialised = 0;
+ 
+@@ -176,6 +178,10 @@ int crypt_random_get(struct crypt_device
+ 		status = _get_urandom(ctx, buf, len);
+ 		break;
+ 	case CRYPT_RND_KEY:
++		if (crypt_fips_mode()) {
++			status = crypt_backend_rng(buf, len);
++			break;
++		}
+ 		rng_type = ctx ? crypt_get_rng_type(ctx) :
+ 				 crypt_random_default_key_rng();
+ 		switch (rng_type) {
+diff -rupN cryptsetup-1.2.0.old/lib/setup.c cryptsetup-1.2.0/lib/setup.c
+--- cryptsetup-1.2.0.old/lib/setup.c	2014-06-23 15:24:54.478981978 +0200
++++ cryptsetup-1.2.0/lib/setup.c	2014-06-23 15:25:31.005829846 +0200
+@@ -9,6 +9,7 @@
  #include "luks.h"
+ #include "internal.h"
+ #include "crypto_backend.h"
++#include "utils_fips.h"
+ 
+ struct crypt_device {
+ 	char *type;
 @@ -2027,6 +2028,11 @@ int crypt_volume_key_get(struct crypt_de
  	char *processed_key = NULL;
  	int r, key_len;
  
-+	if (FIPSCHECK_kernel_fips_mode()) {
++	if (crypt_fips_mode()) {
 +		log_err(cd, "Function not available in FIPS mode.\n");
 +		return -EACCES;
 +	}
@@ -200,3 +200,233 @@
  	key_len = crypt_get_volume_key_size(cd);
  	if (key_len > *volume_key_size) {
  		log_err(cd, _("Volume key buffer too small.\n"));
+@@ -2316,3 +2322,8 @@ int crypt_get_active_device(struct crypt
+ 
+ 	return 0;
+ }
++
++static void __attribute__((constructor)) libcryptsetup_ctor(void)
++{
++	crypt_fips_libcryptsetup_check();
++}
+diff -rupN cryptsetup-1.2.0.old/lib/utils_fips.c cryptsetup-1.2.0/lib/utils_fips.c
+--- cryptsetup-1.2.0.old/lib/utils_fips.c	1970-01-01 01:00:00.000000000 +0100
++++ cryptsetup-1.2.0/lib/utils_fips.c	2014-06-23 15:25:13.694901894 +0200
+@@ -0,0 +1,52 @@
++/*
++ * FIPS mode utilities
++ *
++ * Copyright (C) 2011-2014, Red Hat, Inc. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * as published by the Free Software Foundation; either version 2
++ * of the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ */
++
++#include <stdlib.h>
++#include <stdio.h>
++#include <unistd.h>
++#include <fipscheck.h>
++
++#include "nls.h"
++#include "utils_fips.h"
++
++#define LIBCRYPTSETUP_VERSION_FIPS "libcryptsetup.so.1"
++#define FIPS_MODULE_FILE "/etc/system-fips"
++
++int crypt_fips_mode(void)
++{
++	return FIPSCHECK_kernel_fips_mode() && !access(FIPS_MODULE_FILE, F_OK);
++}
++
++static void crypt_fips_verify(const char *name, const char *function)
++{
++	if (access(FIPS_MODULE_FILE, F_OK))
++		return;
++
++	if (!FIPSCHECK_verify(name, function)) {
++		fputs(_("FIPS checksum verification failed.\n"), stderr);
++		if (FIPSCHECK_kernel_fips_mode())
++			_exit(EXIT_FAILURE);
++	}
++}
++
++void crypt_fips_libcryptsetup_check(void)
++{
++	crypt_fips_verify(LIBCRYPTSETUP_VERSION_FIPS, "crypt_init");
++}
+diff -rupN cryptsetup-1.2.0.old/lib/utils_fips.h cryptsetup-1.2.0/lib/utils_fips.h
+--- cryptsetup-1.2.0.old/lib/utils_fips.h	1970-01-01 01:00:00.000000000 +0100
++++ cryptsetup-1.2.0/lib/utils_fips.h	2014-06-23 15:25:13.694901894 +0200
+@@ -0,0 +1,29 @@
++/*
++ * FIPS mode utilities
++ *
++ * Copyright (C) 2011-2014, Red Hat, Inc. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * as published by the Free Software Foundation; either version 2
++ * of the License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ */
++
++#ifndef _UTILS_FIPS_H
++#define _UTILS_FIPS_H
++
++struct crypt_device;
++
++int crypt_fips_mode(void);
++void crypt_fips_libcryptsetup_check(void);
++
++#endif /* _UTILS_FIPS_H */
+diff -rupN cryptsetup-1.2.0.old/src/cryptsetup.c cryptsetup-1.2.0/src/cryptsetup.c
+--- cryptsetup-1.2.0.old/src/cryptsetup.c	2010-12-09 19:14:25.000000000 +0100
++++ cryptsetup-1.2.0/src/cryptsetup.c	2014-06-23 15:25:13.695901889 +0200
+@@ -989,6 +989,10 @@ int main(int argc, char **argv)
+ 	if (r < -1)
+ 		usage(popt_context, EXIT_FAILURE, poptStrerror(r),
+ 		      poptBadOption(popt_context, POPT_BADOPTION_NOALIAS));
++
++	if (crypt_fips_mode())
++		crypt_log(NULL, CRYPT_LOG_VERBOSE, _("Running in FIPS mode.\n"));
++
+ 	if (opt_version_mode) {
+ 		log_std("%s %s\n", PACKAGE_NAME, PACKAGE_VERSION);
+ 		exit(EXIT_SUCCESS);
+diff -rupN cryptsetup-1.2.0.old/src/cryptsetup.h cryptsetup-1.2.0/src/cryptsetup.h
+--- cryptsetup-1.2.0.old/src/cryptsetup.h	2010-10-27 10:21:23.000000000 +0200
++++ cryptsetup-1.2.0/src/cryptsetup.h	2014-06-23 15:25:13.695901889 +0200
+@@ -7,6 +7,7 @@
+ 
+ #include "lib/nls.h"
+ #include "lib/utils_crypt.h"
++#include "lib/utils_fips.h"
+ 
+ #define DEFAULT_CIPHER(type)	(DEFAULT_##type##_CIPHER "-" DEFAULT_##type##_MODE)
+ 
+diff -rupN cryptsetup-1.2.0.old/src/Makefile.am cryptsetup-1.2.0/src/Makefile.am
+--- cryptsetup-1.2.0.old/src/Makefile.am	2010-10-27 10:21:23.000000000 +0200
++++ cryptsetup-1.2.0/src/Makefile.am	2014-06-23 15:25:13.695901889 +0200
+@@ -11,11 +11,13 @@ INCLUDES = \
+ 
+ cryptsetup_SOURCES = \
+ 	$(top_builddir)/lib/utils_crypt.c	\
++	$(top_builddir)/lib/utils_fips.c	\
+ 	cryptsetup.c				\
+ 	cryptsetup.h
+ 
+ cryptsetup_LDADD = \
+ 	$(top_builddir)/lib/libcryptsetup.la	\
++	-lfipscheck				\
+ 	@POPT_LIBS@
+ 
+ cryptsetup_CFLAGS = -Wall
+diff -rupN cryptsetup-1.2.0.old/src/Makefile.in cryptsetup-1.2.0/src/Makefile.in
+--- cryptsetup-1.2.0.old/src/Makefile.in	2010-12-20 12:35:53.000000000 +0100
++++ cryptsetup-1.2.0/src/Makefile.in	2014-06-23 15:25:13.695901889 +0200
+@@ -57,6 +57,7 @@ CONFIG_CLEAN_VPATH_FILES =
+ am__installdirs = "$(DESTDIR)$(sbindir)"
+ PROGRAMS = $(sbin_PROGRAMS)
+ am_cryptsetup_OBJECTS = cryptsetup-utils_crypt.$(OBJEXT) \
++	cryptsetup-utils_fips.$(OBJEXT) \
+ 	cryptsetup-cryptsetup.$(OBJEXT)
+ cryptsetup_OBJECTS = $(am_cryptsetup_OBJECTS)
+ cryptsetup_DEPENDENCIES = $(top_builddir)/lib/libcryptsetup.la
+@@ -64,8 +65,10 @@ cryptsetup_LINK = $(LIBTOOL) --tag=CC $(
+ 	$(LIBTOOLFLAGS) --mode=link $(CCLD) $(cryptsetup_CFLAGS) \
+ 	$(CFLAGS) $(AM_LDFLAGS) $(LDFLAGS) -o $@
+ am__cryptsetup_static_SOURCES_DIST =  \
+-	$(top_builddir)/lib/utils_crypt.c cryptsetup.c cryptsetup.h
++	$(top_builddir)/lib/utils_crypt.c \
++	$(top_builddir)/lib/utils_fips.c cryptsetup.c cryptsetup.h
+ am__objects_1 = cryptsetup_static-utils_crypt.$(OBJEXT) \
++	cryptsetup_static-utils_fips.$(OBJEXT) \
+ 	cryptsetup_static-cryptsetup.$(OBJEXT)
+ @STATIC_CRYPTSETUP_TRUE@am_cryptsetup_static_OBJECTS =  \
+ @STATIC_CRYPTSETUP_TRUE@	$(am__objects_1)
+@@ -250,11 +253,13 @@ INCLUDES = \
+ 
+ cryptsetup_SOURCES = \
+ 	$(top_builddir)/lib/utils_crypt.c	\
++	$(top_builddir)/lib/utils_fips.c	\
+ 	cryptsetup.c				\
+ 	cryptsetup.h
+ 
+ cryptsetup_LDADD = \
+ 	$(top_builddir)/lib/libcryptsetup.la	\
++	-lfipscheck				\
+ 	@POPT_LIBS@
+ 
+ cryptsetup_CFLAGS = -Wall
+@@ -358,8 +363,10 @@ distclean-compile:
+ 
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/cryptsetup-cryptsetup.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/cryptsetup-utils_crypt.Po@am__quote@
++@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/cryptsetup-utils_fips.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/cryptsetup_static-cryptsetup.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/cryptsetup_static-utils_crypt.Po@am__quote@
++@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/cryptsetup_static-utils_fips.Po@am__quote@
+ 
+ .c.o:
+ @am__fastdepCC_TRUE@	$(COMPILE) -MT $@ -MD -MP -MF $(DEPDIR)/$*.Tpo -c -o $@ $<
+@@ -396,6 +403,20 @@ cryptsetup-utils_crypt.obj: $(top_buildd
+ @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+ @am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(cryptsetup_CFLAGS) $(CFLAGS) -c -o cryptsetup-utils_crypt.obj `if test -f '$(top_builddir)/lib/utils_crypt.c'; then $(CYGPATH_W) '$(top_builddir)/lib/utils_crypt.c'; else $(CYGPATH_W) '$(srcdir)/$(top_builddir)/lib/utils_crypt.c'; fi`
+ 
++cryptsetup-utils_fips.o: $(top_builddir)/lib/utils_fips.c
++@am__fastdepCC_TRUE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(cryptsetup_CFLAGS) $(CFLAGS) -MT cryptsetup-utils_fips.o -MD -MP -MF $(DEPDIR)/cryptsetup-utils_fips.Tpo -c -o cryptsetup-utils_fips.o `test -f '$(top_builddir)/lib/utils_fips.c' || echo '$(srcdir)/'`$(top_builddir)/lib/utils_fips.c
++@am__fastdepCC_TRUE@	$(am__mv) $(DEPDIR)/cryptsetup-utils_fips.Tpo $(DEPDIR)/cryptsetup-utils_fips.Po
++@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='$(top_builddir)/lib/utils_fips.c' object='cryptsetup-utils_fips.o' libtool=no @AMDEPBACKSLASH@
++@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
++@am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(cryptsetup_CFLAGS) $(CFLAGS) -c -o cryptsetup-utils_fips.o `test -f '$(top_builddir)/lib/utils_fips.c' || echo '$(srcdir)/'`$(top_builddir)/lib/utils_fips.c
++
++cryptsetup-utils_fips.obj: $(top_builddir)/lib/utils_fips.c
++@am__fastdepCC_TRUE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(cryptsetup_CFLAGS) $(CFLAGS) -MT cryptsetup-utils_fips.obj -MD -MP -MF $(DEPDIR)/cryptsetup-utils_fips.Tpo -c -o cryptsetup-utils_fips.obj `if test -f '$(top_builddir)/lib/utils_fips.c'; then $(CYGPATH_W) '$(top_builddir)/lib/utils_fips.c'; else $(CYGPATH_W) '$(srcdir)/$(top_builddir)/lib/utils_fips.c'; fi`
++@am__fastdepCC_TRUE@	$(am__mv) $(DEPDIR)/cryptsetup-utils_fips.Tpo $(DEPDIR)/cryptsetup-utils_fips.Po
++@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='$(top_builddir)/lib/utils_fips.c' object='cryptsetup-utils_fips.obj' libtool=no @AMDEPBACKSLASH@
++@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
++@am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(cryptsetup_CFLAGS) $(CFLAGS) -c -o cryptsetup-utils_fips.obj `if test -f '$(top_builddir)/lib/utils_fips.c'; then $(CYGPATH_W) '$(top_builddir)/lib/utils_fips.c'; else $(CYGPATH_W) '$(srcdir)/$(top_builddir)/lib/utils_fips.c'; fi`
++
+ cryptsetup-cryptsetup.o: cryptsetup.c
+ @am__fastdepCC_TRUE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(cryptsetup_CFLAGS) $(CFLAGS) -MT cryptsetup-cryptsetup.o -MD -MP -MF $(DEPDIR)/cryptsetup-cryptsetup.Tpo -c -o cryptsetup-cryptsetup.o `test -f 'cryptsetup.c' || echo '$(srcdir)/'`cryptsetup.c
+ @am__fastdepCC_TRUE@	$(am__mv) $(DEPDIR)/cryptsetup-cryptsetup.Tpo $(DEPDIR)/cryptsetup-cryptsetup.Po
+@@ -424,6 +445,20 @@ cryptsetup_static-utils_crypt.obj: $(top
+ @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+ @am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(cryptsetup_static_CFLAGS) $(CFLAGS) -c -o cryptsetup_static-utils_crypt.obj `if test -f '$(top_builddir)/lib/utils_crypt.c'; then $(CYGPATH_W) '$(top_builddir)/lib/utils_crypt.c'; else $(CYGPATH_W) '$(srcdir)/$(top_builddir)/lib/utils_crypt.c'; fi`
+ 
++cryptsetup_static-utils_fips.o: $(top_builddir)/lib/utils_fips.c
++@am__fastdepCC_TRUE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(cryptsetup_static_CFLAGS) $(CFLAGS) -MT cryptsetup_static-utils_fips.o -MD -MP -MF $(DEPDIR)/cryptsetup_static-utils_fips.Tpo -c -o cryptsetup_static-utils_fips.o `test -f '$(top_builddir)/lib/utils_fips.c' || echo '$(srcdir)/'`$(top_builddir)/lib/utils_fips.c
++@am__fastdepCC_TRUE@	$(am__mv) $(DEPDIR)/cryptsetup_static-utils_fips.Tpo $(DEPDIR)/cryptsetup_static-utils_fips.Po
++@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='$(top_builddir)/lib/utils_fips.c' object='cryptsetup_static-utils_fips.o' libtool=no @AMDEPBACKSLASH@
++@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
++@am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(cryptsetup_static_CFLAGS) $(CFLAGS) -c -o cryptsetup_static-utils_fips.o `test -f '$(top_builddir)/lib/utils_fips.c' || echo '$(srcdir)/'`$(top_builddir)/lib/utils_fips.c
++
++cryptsetup_static-utils_fips.obj: $(top_builddir)/lib/utils_fips.c
++@am__fastdepCC_TRUE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(cryptsetup_static_CFLAGS) $(CFLAGS) -MT cryptsetup_static-utils_fips.obj -MD -MP -MF $(DEPDIR)/cryptsetup_static-utils_fips.Tpo -c -o cryptsetup_static-utils_fips.obj `if test -f '$(top_builddir)/lib/utils_fips.c'; then $(CYGPATH_W) '$(top_builddir)/lib/utils_fips.c'; else $(CYGPATH_W) '$(srcdir)/$(top_builddir)/lib/utils_fips.c'; fi`
++@am__fastdepCC_TRUE@	$(am__mv) $(DEPDIR)/cryptsetup_static-utils_fips.Tpo $(DEPDIR)/cryptsetup_static-utils_fips.Po
++@AMDEP_TRUE@@am__fastdepCC_FALSE@	source='$(top_builddir)/lib/utils_fips.c' object='cryptsetup_static-utils_fips.obj' libtool=no @AMDEPBACKSLASH@
++@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
++@am__fastdepCC_FALSE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(cryptsetup_static_CFLAGS) $(CFLAGS) -c -o cryptsetup_static-utils_fips.obj `if test -f '$(top_builddir)/lib/utils_fips.c'; then $(CYGPATH_W) '$(top_builddir)/lib/utils_fips.c'; else $(CYGPATH_W) '$(srcdir)/$(top_builddir)/lib/utils_fips.c'; fi`
++
+ cryptsetup_static-cryptsetup.o: cryptsetup.c
+ @am__fastdepCC_TRUE@	$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(AM_CPPFLAGS) $(CPPFLAGS) $(cryptsetup_static_CFLAGS) $(CFLAGS) -MT cryptsetup_static-cryptsetup.o -MD -MP -MF $(DEPDIR)/cryptsetup_static-cryptsetup.Tpo -c -o cryptsetup_static-cryptsetup.o `test -f 'cryptsetup.c' || echo '$(srcdir)/'`cryptsetup.c
+ @am__fastdepCC_TRUE@	$(am__mv) $(DEPDIR)/cryptsetup_static-cryptsetup.Tpo $(DEPDIR)/cryptsetup_static-cryptsetup.Po

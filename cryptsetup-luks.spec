@@ -6,7 +6,7 @@
 Summary: A utility for setting up encrypted filesystems
 Name: cryptsetup-luks
 Version: 1.2.0
-Release: 7%{?dist}
+Release: 11%{?dist}
 License: GPLv2
 Group: Applications/System
 URL: http://cryptsetup.googlecode.com/
@@ -82,7 +82,6 @@ make %{?_smp_mflags}
   %{?__debug_package:%{__debug_install_post}} \
   %{__arch_install_post} \
   %{__os_install_post} \
-  fipshmac $RPM_BUILD_ROOT/%{_root_sbindir}/cryptsetup \
   fipshmac $RPM_BUILD_ROOT/%{_lib}/libcryptsetup.so.*
 %endif
 
@@ -110,7 +109,6 @@ popd
 %{_mandir}/man8/cryptsetup.8.gz
 %{_root_sbindir}/cryptsetup
 %if %{enable_fips}
-%{_root_sbindir}/.cryptsetup.hmac
 %endif
 
 %files devel
@@ -130,6 +128,22 @@ popd
 rm -rf $RPM_BUILD_ROOT
 
 %changelog
+* Mon Jun 23 2014 Ondrej Kozina <okozina@redhat.com> - 1.2.0-11
+- remove unused log routine
+  Resolves: #1112276
+
+* Fri Jun 20 2014 Ondrej Kozina <okozina@redhat.com> - 1.2.0-10
+- Update library constructor to issue warning
+  Resolves: #1009707
+
+* Thu Oct 10 2013 Ondrej Kozina <okozina@redhat.com> - 1.2.0-9
+- remove FIPS check from cryptsetup utility constructor (not required)
+  Resolves: #1009707
+
+* Fri Oct 04 2013 Ondrej Kozina <okozina@redhat.com> - 1.2.0-8
+- Add constructors to library and cryptsetup utlitity for FIPS.
+  Resolves: #1009707
+
 * Wed Feb 29 2012 Milan Broz <mbroz@redhat.com> - 1.2.0-7
 - Fix device lookup function.
 - Fix duplicate directories displayed in status output.
