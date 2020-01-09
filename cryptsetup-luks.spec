@@ -6,7 +6,7 @@
 Summary: A utility for setting up encrypted filesystems
 Name: cryptsetup-luks
 Version: 1.2.0
-Release: 3%{?dist}
+Release: 3%{?dist}.2
 License: GPLv2
 Group: Applications/System
 URL: http://cryptsetup.googlecode.com/
@@ -124,6 +124,14 @@ popd
 rm -rf $RPM_BUILD_ROOT
 
 %changelog
+* Wed Jun 15 2011 Milan Broz <mbroz@redhat.com> - 1.2.0-3.el6_1.2
+- Move informational FIPS mode message to verbose mode.
+  Resolves: #713456
+
+* Thu Jun 02 2011 Milan Broz <mbroz@redhat.com> - 1.2.0-3.el6_1.1
+- Disable volume key access function in FIPS mode.
+  Resolves: #709055
+
 * Mon Apr 04 2011 Milan Broz <mbroz@redhat.com> - 1.2.0-3
 - Require updated device mapper library (secure flag).
 - Use FIPS RNG for keyslot salt in FIPS mode.

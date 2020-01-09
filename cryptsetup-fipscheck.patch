@@ -33,7 +33,7 @@
 +			log_err(ctx, "FIPS checksum verification failed.\n");
 +			exit(EXIT_FAILURE);
 +		}
-+		log_std(ctx, "Running in FIPS mode.\n");
++		log_verbose(ctx, "Running in FIPS mode.\n");
 +	}
 +
  	if (!gcry_control (GCRYCTL_INITIALIZATION_FINISHED_P)) {
@@ -178,3 +178,25 @@
  	if(r < 0) return r;
  
  //	assert((vk->keylength % TWOFISH_BLOCKSIZE) == 0); FIXME
+--- cryptsetup-1.2.0.old/lib/setup.c	2011-05-07 17:33:04.000000000 +0200
++++ cryptsetup-1.2.0/lib/setup.c	2011-05-07 17:37:23.599499739 +0200
+@@ -4,6 +4,7 @@
+ #include <stdarg.h>
+ #include <fcntl.h>
+ #include <errno.h>
++#include <fipscheck.h>
+ 
+ #include "libcryptsetup.h"
+ #include "luks.h"
+@@ -2027,6 +2028,11 @@ int crypt_volume_key_get(struct crypt_de
+ 	char *processed_key = NULL;
+ 	int r, key_len;
+ 
++	if (FIPSCHECK_kernel_fips_mode()) {
++		log_err(cd, "Function not available in FIPS mode.\n");
++		return -EACCES;
++	}
++
+ 	key_len = crypt_get_volume_key_size(cd);
+ 	if (key_len > *volume_key_size) {
+ 		log_err(cd, _("Volume key buffer too small.\n"));
